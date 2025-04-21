@@ -113,6 +113,7 @@ pub(crate) type JoinHashMapOffset = (usize, Option<u64>);
 
 // Macro for traversing chained values with limit.
 // Early returns in case of reaching output tuples limit.
+/* change chain_traverse from macro to inline method for readability
 macro_rules! chain_traverse {
     (
         $input_indices:ident, $match_indices:ident, $hash_values:ident, $next_chain:ident,
@@ -154,7 +155,12 @@ macro_rules! chain_traverse {
         }
     };
 }
-
+*/
+pub enum TraverseResult {
+    NextProbe,
+    Completed,
+    Continuation(JoinHashMapOffset)
+}
 // Trait defining methods that must be implemented by a hash map type to be used for joins.
 pub trait JoinHashMapType {
     /// The type of list used to store the next list
@@ -261,8 +267,8 @@ pub trait JoinHashMapType {
         limit: usize,
         offset: JoinHashMapOffset,
     ) -> (Vec<u32>, Vec<u64>, Option<JoinHashMapOffset>) {
-        let mut input_indices = vec![];
-        let mut match_indices = vec![];
+        let mut input_indices = Vec::with_capacity(limit);
+        let mut match_indices = Vec::with_capacity(limit);
 
         let mut remaining_output = limit;
 
@@ -279,16 +285,11 @@ pub trait JoinHashMapType {
             // Otherwise, process remaining `initial_idx` matches by traversing `next_chain`,
             // to start with the next index
             (initial_idx, Some(initial_next_idx)) => {
-                chain_traverse!(
-                    input_indices,
-                    match_indices,
-                    hash_values,
-                    next_chain,
-                    initial_idx,
-                    initial_next_idx,
-                    deleted_offset,
-                    remaining_output
-                );
+                match Self::chain_traverse(&mut input_indices, &mut match_indices, hash_values, next_chain, initial_idx, initial_next_idx, deleted_offset, &mut remaining_output) {
+                    TraverseResult::NextProbe => {},
+                    TraverseResult::Completed => return (input_indices, match_indices, None),
+                    TraverseResult::Continuation(next_index) => return (input_indices, match_indices, Some(next_index)),
+                }
 
                 initial_idx + 1
             }
@@ -299,21 +300,55 @@ pub trait JoinHashMapType {
             if let Some((_, index)) =
                 hash_map.find(*hash_value, |(hash, _)| *hash_value == *hash)
             {
-                chain_traverse!(
-                    input_indices,
-                    match_indices,
-                    hash_values,
-                    next_chain,
-                    row_idx,
-                    index,
-                    deleted_offset,
-                    remaining_output
-                );
+                match Self::chain_traverse(&mut input_indices, &mut match_indices, hash_values, next_chain, row_idx, *index, deleted_offset, &mut remaining_output) {
+                    TraverseResult::NextProbe => {},
+                    TraverseResult::Completed => return (input_indices, match_indices, None),
+                    TraverseResult::Continuation(next_index) => return (input_indices, match_indices, Some(next_index)),
+                }
             }
             row_idx += 1;
         }
 
         (input_indices, match_indices, None)
+    }
+
+    /// rewrite `chain_traverse` as a function for better readability
+    #[inline(always)]
+    fn chain_traverse(input_indices: &mut Vec<u32>, match_indices: &mut Vec<u64>, hash_values: &[u64], next_chain: &Self::NextType,
+                      probe_idx: usize, chain_idx: u64, deleted_offset: Option<usize>, remaining_output: &mut usize) -> TraverseResult {
+        let mut i = chain_idx - 1;
+        loop {
+            let match_row_idx = if let Some(offset) = deleted_offset {      // TODO? what is deleted_offset
+                // This arguments means that we prune the next index way before here.
+                if i < offset as u64 {
+                    // End of the list due to pruning
+                    break TraverseResult::NextProbe;
+                }
+                i - offset as u64
+            } else {
+                i
+            };
+            match_indices.push(match_row_idx);
+            input_indices.push(probe_idx as u32);
+            *remaining_output -= 1;
+            // Follow the chain to get the next index value
+            let next = next_chain[match_row_idx as usize];
+
+            if *remaining_output == 0 {
+                // In case current input index is the last, and no more chain values left
+                // returning None as whole input has been scanned
+                if probe_idx == hash_values.len() - 1 && next == 0 {
+                    break TraverseResult::Completed
+                } else {
+                    break TraverseResult::Continuation((probe_idx, Some(next)))
+                };
+            }
+            if next == 0 {
+                // end of list
+                break TraverseResult::NextProbe;
+            }
+            i = next - 1;
+        }
     }
 }
 

@@ -1427,6 +1427,14 @@ impl HashJoinStream {
             .get_shared(cx))?;
         build_timer.done();
 
+        #[cfg(debug_assertions)] {
+            let map = left_data.hash_map().get_map();
+            let next = left_data.hash_map().get_list();
+            let zeros = next.iter().filter(|&&x| x == 0).count();
+
+            println!("hash_map len: {}, next len: {}, zeros count: {}", map.len(), next.len(), zeros);
+        }
+
         self.state = HashJoinStreamState::FetchProbeBatch;
         self.build_side = BuildSide::Ready(BuildSideReadyState { left_data });
 
@@ -1480,6 +1488,28 @@ impl HashJoinStream {
     fn process_probe_batch(
         &mut self,
     ) -> Result<StatefulStreamResult<Option<RecordBatch>>> {
+
+        #[cfg(debug_assertions)] {
+            if self.join_metrics.input_batches.value() == 1 {
+                println!("\nruns at here, changed");
+                println!("schema = {:?}", self.schema); // the schema of the output batch
+                println!("on_right = {:?}", self.on_right); // the join keys from the right side
+                println!("filter = {:?}", self.filter); // the join filter
+                println!("join_type = {:?}", self.join_type); // the join type
+                // println!("right = {:?}", self.right); // the right side, not Debug
+                println!("random_state = {:?}", self.random_state); // the random state
+                println!("column_indices = {:?}", self.column_indices); // the column indices
+                println!("null_equals_null = {:?}", self.null_equals_null); // null equals null
+                // println!("state = {:?}", self.state); // the state of the stream
+
+                let probe_batch = &self.state.try_as_process_probe_batch_mut()?.batch;
+
+                // println!("build_side = {:?}", self.build_side); // the build side, not Debug
+                println!("batch_size = {:?}", self.batch_size); // the batch size
+                // println!("hashes_buffer = {:?}", self.hashes_buffer); // the hashes buffer
+                println!("right_side_ordered = {:?}", self.right_side_ordered); // the right side ordered
+            }
+        }
         let state = self.state.try_as_process_probe_batch_mut()?;
         let build_side = self.build_side.try_as_ready_mut()?;
 
@@ -1495,6 +1525,25 @@ impl HashJoinStream {
             self.batch_size,
             state.offset,
         )?;
+
+        #[cfg(debug_assertions)] {
+            if self.join_metrics.input_batches.value() == 0 {   // change to 1
+                let red = "\x1b[31m";
+                let blue = "\x1b[34m";
+                let reset = "\x1b[0m";
+
+                println!("left length = {:?}, right length = {:?}", left_indices.len(), right_indices.len());
+
+                for i in 0..left_indices.len() {
+                    let build = left_indices.value(i);
+                    let probe = right_indices.value(i);
+                    print!("{blue}{probe:03}{reset} <-> {red}{build:03}{reset}\t");
+                    if i % 5 == 4 {
+                        println!();
+                    }
+                }
+            }
+        }
 
         // apply join filter if exists
         let (left_indices, right_indices) = if let Some(filter) = &self.filter {
